@@ -1,0 +1,39 @@
+# macOS
+.DS_Store
+
+# Node
+node_modules/
+*.log
+npm-debug.log*
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Credentials (使用 credentials.example.json 模板)
+credentials.json
+session_cookie.txt
+
+# macOS
+.Trashes
+.AppleDouble
+.LSOverride
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# esleer local data (不要提交本地数据库)
+*.db
+*.db-shm
+*.db-wal
+
+# macOS
+.AppleDB
+.AppleDB-lock
