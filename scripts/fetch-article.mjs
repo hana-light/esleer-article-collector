@@ -20,7 +20,9 @@ import * as cheerio from 'cheerio';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const PROJECT_ROOT = path.resolve(__dirname, '..');
-const DB_PATH = path.resolve(PROJECT_ROOT, 'esleer-data', 'dev.db');
+// Default: sibling esleer repo. Override with ESLEER_DB_PATH env var.
+const DB_PATH = process.env.ESLEER_DB_PATH ||
+  path.resolve(PROJECT_ROOT, '..', 'esleer', 'esleer-data', 'dev.db');
 const FETCH_LOG = path.resolve(__dirname, 'fetch-log.json');
 const USER_ID = 'cmmc0w0230000j6sjggm1mlir';
 
@@ -388,12 +390,16 @@ function detectListPage(url) {
 
 async function main() {
   const args = process.argv.slice(2);
-  if (args.length < 1) {
-    console.error('用法: node scripts/fetch-article.mjs <URL>');
+  const JOB_MODE = args.includes('--job-mode');
+  // logs go to stderr in job mode so stdout stays clean for JSON output
+  const log = (...a) => JOB_MODE ? process.stderr.write(a.join(' ') + '\n') : console.log(...a);
+
+  const url = args.find(a => !a.startsWith('--'))?.trim();
+  if (!url) {
+    console.error('用法: node scripts/fetch-article.mjs <URL> [--job-mode]');
     process.exit(1);
   }
 
-  const url = args[0].trim();
   if (!url.startsWith('http')) {
     console.error('❌ URL 必须以 http:// 或 https:// 开头');
     process.exit(1);
@@ -419,16 +425,16 @@ async function main() {
     process.exit(1);
   }
 
-  console.log(`🌐 抓取: ${url}  (${hostname} 今天第 ${count + 1}/${limit} 次)`);
+  log(`🌐 抓取: ${url}  (${hostname} 今天第 ${count + 1}/${limit} 次)`);
 
   const htmlContent = await fetchHtml(url);
-  console.log(`  HTML 大小: ${htmlContent.length.toLocaleString()} chars`);
+  log(`  HTML 大小: ${htmlContent.length.toLocaleString()} chars`);
 
   const articleData = extractArticle(htmlContent, url);
-  console.log(`  标题: ${articleData.title.slice(0, 60)}`);
-  console.log(`  作者: ${articleData.author || 'N/A'}`);
-  console.log(`  主题: ${articleData.topic}`);
-  console.log(`  正文长度: ${articleData.content.length.toLocaleString()} chars`);
+  log(`  标题: ${articleData.title.slice(0, 60)}`);
+  log(`  作者: ${articleData.author || 'N/A'}`);
+  log(`  主题: ${articleData.topic}`);
+  log(`  正文长度: ${articleData.content.length.toLocaleString()} chars`);
 
   let articleId;
   try {
@@ -441,14 +447,23 @@ async function main() {
   try {
     recordFetch(hostname);
   } catch (err) {
-    console.warn(`⚠ 记录节流日志失败（不影响文章保存）: ${err.message}`);
+    log(`⚠ 记录节流日志失败（不影响文章保存）: ${err.message}`);
   }
 
-  console.log(`\n✅ 已写入数据库，article_id = ${articleId}`);
-  console.log(`   验证: http://localhost:3000/esleer/reader/${articleId}`);
+  if (JOB_MODE) {
+    console.log(JSON.stringify({ success: true, articleId, title: articleData.title }));
+  } else {
+    console.log(`\n✅ 已写入数据库，article_id = ${articleId}`);
+    console.log(`   验证: http://localhost:3000/esleer/reader/${articleId}`);
+  }
 }
 
 main().catch(err => {
-  console.error(`❌ 采集失败: ${err.message}`);
+  const JOB_MODE = process.argv.includes('--job-mode');
+  if (JOB_MODE) {
+    console.log(JSON.stringify({ success: false, error: err.message }));
+  } else {
+    console.error(`❌ 采集失败: ${err.message}`);
+  }
   process.exit(1);
 });
