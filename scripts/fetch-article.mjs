@@ -18,7 +18,7 @@
 
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { readFileSync, writeFileSync } from 'fs';
+import { readFileSync, writeFileSync, appendFileSync } from 'fs';
 import pkg from '@prisma/client';
 const { PrismaClient } = pkg;
 import * as cheerio from 'cheerio';
@@ -31,6 +31,7 @@ const PROJECT_ROOT = path.resolve(__dirname, '..');
 const DB_PATH = process.env.ESLEER_DB_PATH ||
   path.resolve(PROJECT_ROOT, '..', 'esleer', 'esleer-data', 'dev.db');
 const FETCH_LOG = path.resolve(__dirname, 'fetch-log.json');
+const FETCH_ERROR_LOG = path.resolve(__dirname, 'fetch-error.log');
 const USER_ID = 'cmmc0w0230000j6sjggm1mlir';
 
 // ---------------------------------------------------------------------------
@@ -89,6 +90,22 @@ function recordFetch(hostname) {
 }
 
 // ---------------------------------------------------------------------------
+// 统一错误日志（JSON Lines）
+// ---------------------------------------------------------------------------
+
+function logFetchError(url, errorType, errorMessage) {
+  const entry = {
+    url,
+    errorType,
+    errorMessage,
+    timestamp: new Date().toISOString(),
+  };
+  try {
+    appendFileSync(FETCH_ERROR_LOG, JSON.stringify(entry) + '\n', 'utf8');
+  } catch { /* ignore */ }
+}
+
+// ---------------------------------------------------------------------------
 // Prisma Client（直连本地 SQLite）
 // 使用 PRISMA_DATABASE_URL 环境变量，与 esleer-next 保持一致
 // ---------------------------------------------------------------------------
@@ -113,39 +130,50 @@ function createPrisma() {
  * @returns {Promise<string>} - HTML 字符串
  */
 async function fetchHtmlWithPlaywright(url) {
+  const MAX_RETRIES = 3;
+  const BACKOFF = [2000, 4000, 8000];
   let browser;
-  try {
-    browser = await chromium.launch({
-      headless: true,
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-blink-features=AutomationControlled',
-      ],
-    });
-    const page = await browser.newPage();
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      browser = await chromium.launch({
+        headless: true,
+        args: [
+          '--no-sandbox',
+          '--disable-setuid-sandbox',
+          '--disable-dev-shm-usage',
+          '--disable-blink-features=AutomationControlled',
+        ],
+      });
+      const page = await browser.newPage();
 
-    // 设置视口和 UA，伪装成真实浏览器
-    await page.setViewportSize({ width: 1280, height: 800 });
-    await page.setExtraHTTPHeaders({
-      'Accept-Language': 'es-ES,es;q=0.9,en;q=0.8',
-    });
+      // 设置视口和 UA，伪装成真实浏览器
+      await page.setViewportSize({ width: 1280, height: 800 });
+      await page.setExtraHTTPHeaders({
+        'Accept-Language': 'es-ES,es;q=0.9,en;q=0.8',
+      });
 
-    await page.goto(url, {
-      waitUntil: 'networkidle',   // 等网络空闲（JS 渲染完成）
-      timeout: 30000,
-    });
+      await page.goto(url, {
+        waitUntil: 'networkidle',   // 等网络空闲（JS 渲染完成）
+        timeout: 30000,
+      });
 
-    // 额外等 2 秒，确保动态内容完全加载
-    await page.waitForTimeout(2000);
+      // 额外等 2 秒，确保动态内容完全加载
+      await page.waitForTimeout(2000);
 
-    const html = await page.content();
-    await browser.close();
-    return html;
-  } catch (err) {
-    if (browser) await browser.close().catch(() => {});
-    throw new Error(`Playwright 采集失败: ${err.message}`);
+      const html = await page.content();
+      await browser.close();
+      return html;
+    } catch (err) {
+      if (browser) await browser.close().catch(() => {});
+      if (attempt < MAX_RETRIES) {
+        const waitMs = BACKOFF[attempt];
+        console.error(`[fetch-article.mjs] Playwright 重试第${attempt + 1}次，等待${waitMs}ms: ${err.message}`);
+        await new Promise(r => setTimeout(r, waitMs));
+      } else {
+        logFetchError(url, 'Playwright', err.message);
+        throw new Error(`Playwright 采集失败: ${err.message}`);
+      }
+    }
   }
 }
 
@@ -154,29 +182,44 @@ async function fetchHtmlWithPlaywright(url) {
  * 用于无 Cloudflare JS 挑战的站点（如 elmundo.es）。
  */
 async function fetchHtmlWithFetch(url) {
-  const resp = await fetch(url, {
-    headers: {
-      'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-      'Accept-Language': 'es-ES,es;q=0.9,en;q=0.8',
-      'Accept-Encoding': 'gzip, deflate',
-      'Connection': 'keep-alive',
-      'Upgrade-Insecure-Requests': '1',
-      'Sec-Fetch-Dest': 'document',
-      'Sec-Fetch-Mode': 'navigate',
-      'Sec-Fetch-Site': 'none',
-      'Sec-Fetch-User': '?1',
-      'Cache-Control': 'max-age=0',
+  const MAX_RETRIES = 3;
+  const BACKOFF = [2000, 4000, 8000];
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      const resp = await fetch(url, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+          'Accept-Language': 'es-ES,es;q=0.9,en;q=0.8',
+          'Accept-Encoding': 'gzip, deflate',
+          'Connection': 'keep-alive',
+          'Upgrade-Insecure-Requests': '1',
+          'Sec-Fetch-Dest': 'document',
+          'Sec-Fetch-Mode': 'navigate',
+          'Sec-Fetch-Site': 'none',
+          'Sec-Fetch-User': '?1',
+          'Cache-Control': 'max-age=0',
+        }
+      });
+      if (!resp.ok) {
+        throw new Error(`HTTP ${resp.status}: ${resp.statusText}`);
+      }
+      const buf = await resp.arrayBuffer();
+      const contentType = resp.headers.get('content-type') || '';
+      const encoding = contentType.includes('iso-8859-15') || contentType.includes('latin1') || contentType.includes('latin-1')
+        ? 'iso-8859-15' : 'utf-8';
+      return new TextDecoder(encoding).decode(buf);
+    } catch (err) {
+      if (attempt < MAX_RETRIES) {
+        const waitMs = BACKOFF[attempt];
+        console.error(`[fetch-article.mjs] 第${attempt + 1}次重试，等待${waitMs}ms: ${err.message}`);
+        await new Promise(r => setTimeout(r, waitMs));
+      } else {
+        logFetchError(url, 'Fetch', err.message);
+        throw new Error(`fetch 采集失败: ${err.message}`);
+      }
     }
-  });
-  if (!resp.ok) {
-    throw new Error(`HTTP ${resp.status}: ${resp.statusText}`);
   }
-  const buf = await resp.arrayBuffer();
-  const contentType = resp.headers.get('content-type') || '';
-  const encoding = contentType.includes('iso-8859-15') || contentType.includes('latin1') || contentType.includes('latin-1')
-    ? 'iso-8859-15' : 'utf-8';
-  return new TextDecoder(encoding).decode(buf);
 }
 
 /**

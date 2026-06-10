@@ -23,22 +23,41 @@ import warnings
 import argparse
 from datetime import datetime
 from pathlib import Path
+import json
+from urllib.parse import urlparse
 
 warnings.filterwarnings("ignore")
 
 DB_PATH = Path(__file__).parent.parent / "esleer-data" / "dev.db"
 ADMIN_USER_ID = "cmmc0w0230000j6sjggm1mlir"
+FETCH_ERROR_LOG = Path(__file__).parent / "fetch-error.log"
+
+
+def log_fetch_error(url: str, error_type: str, error_message: str):
+    """Write a fetch error to fetch-error.log in JSON Lines format."""
+    entry = {
+        "url": url,
+        "errorType": error_type,
+        "errorMessage": error_message,
+        "timestamp": datetime.now().isoformat(),
+    }
+    try:
+        with open(FETCH_ERROR_LOG, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry) + "\n")
+    except Exception:
+        pass
 
 
 def fetch_html(url: str) -> str:
     import requests
-    # 用 session 先打 elpais.com 首页拿 cookie，解决 403
+
     session = requests.Session()
-    # 先打 elpais.com 首页建立 cookie，再抓目标页（忽略首页 403）
+    # 用 session 先打 elpais.com 首页拿 cookie，解决 403
     try:
         session.get("https://elpais.com/", headers={"User-Agent": "Mozilla/5.0"}, timeout=5)
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[fetch-article.py] 首页预热失败（不影响采集）: {e}")
+
     headers = {
         "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
@@ -52,9 +71,27 @@ def fetch_html(url: str) -> str:
         "Sec-Fetch-User": "?1",
         "Cache-Control": "max-age=0",
     }
-    resp = session.get(url, headers=headers, timeout=20)
-    resp.raise_for_status()
-    return resp.text
+
+    # Exponential backoff: 3 retries, intervals 2s/4s/8s
+    max_retries = 3
+    backoff = [2, 4, 8]
+    last_err = None
+    for attempt in range(max_retries + 1):
+        try:
+            resp = session.get(url, headers=headers, timeout=20)
+            resp.raise_for_status()
+            return resp.text
+        except requests.exceptions.RequestException as err:
+            last_err = err
+            if attempt < max_retries:
+                wait = backoff[attempt]
+                print(f"[fetch-article.py] 重试第{attempt + 1}次，等待{wait}s: {err}")
+                import time
+                time.sleep(wait)
+            # else: final attempt failed, will log below
+
+    log_fetch_error(url, "requests", str(last_err))
+    raise last_err
 
 
 def extract_article(html_content: str, url: str, mode: str = "default") -> dict:
