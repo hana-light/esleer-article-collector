@@ -6,16 +6,23 @@
  * 数据库: esleer-data/dev.db
  * 用户:   hiuva@outlook.com (id: cmmc0w0230000j6sjggm1mlir)
  *
- * 反爬策略: 同一域名 24 小时内最多采集 3 次，超限拒绝
+ * 反爬策略:
+ * - 同一域名 24 小时内最多采集 3 次，超限拒绝
+ * - elmundo 等普通站点 → 普通 fetch
+ * - elpais.com → Playwright（真实浏览器），绕过 Cloudflare JS 挑战
+ *
+ * 依赖:
+ *   npm install
+ *   npx playwright install chromium   # 首次运行前必须执行
  */
 
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { readFileSync, writeFileSync } from 'fs';
-import { createClient } from '@libsql/client';
-import { PrismaLibSQL } from '@prisma/adapter-libsql';
-import { PrismaClient } from '@prisma/client';
+import pkg from '@prisma/client';
+const { PrismaClient } = pkg;
 import * as cheerio from 'cheerio';
+import { chromium } from 'playwright';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -82,61 +89,107 @@ function recordFetch(hostname) {
 }
 
 // ---------------------------------------------------------------------------
-// Prisma Client（通过 libsql adapter 直连本地 SQLite）
+// Prisma Client（直连本地 SQLite）
+// 使用 PRISMA_DATABASE_URL 环境变量，与 esleer-next 保持一致
 // ---------------------------------------------------------------------------
 
 function createPrisma() {
-  const libsql = createClient({ url: `file:${DB_PATH}` });
-  const adapter = new PrismaLibSQL(libsql);
-  return new PrismaClient({ adapter });
+  // 覆盖 env var，指向正确的 DB 路径
+  process.env.PRISMA_DATABASE_URL = `file:${DB_PATH}`;
+  return new PrismaClient();
 }
 
+// ---------------------------------------------------------------------------
 // ---------------------------------------------------------------------------
 // 采集
 // ---------------------------------------------------------------------------
 
-async function fetchHtml(url) {
-  const hostname = new URL(url).hostname;
+/**
+ * 用 Playwright（真实浏览器）抓取页面 HTML。
+ * 用于被 Cloudflare JS 挑战拦截的站点（如 elpais.com）。
+ * 原理：Chromium 执行真实 JS，通过 Cloudflare 的 JS 挑战，拿到渲染后的 HTML。
+ *
+ * @param {string} url - 目标 URL
+ * @returns {Promise<string>} - HTML 字符串
+ */
+async function fetchHtmlWithPlaywright(url) {
+  let browser;
+  try {
+    browser = await chromium.launch({
+      headless: true,
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-blink-features=AutomationControlled',
+      ],
+    });
+    const page = await browser.newPage();
 
-  // 先打 elpais.com 首页建立 cookie 再采（解决 403）
-  if (hostname.includes('elpais')) {
-    try {
-      await fetch('https://elpais.com/', {
-        headers: { 'User-Agent': 'Mozilla/5.0' }
-      });
-    } catch { /* ignore */ }
+    // 设置视口和 UA，伪装成真实浏览器
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await page.setExtraHTTPHeaders({
+      'Accept-Language': 'es-ES,es;q=0.9,en;q=0.8',
+    });
+
+    await page.goto(url, {
+      waitUntil: 'networkidle',   // 等网络空闲（JS 渲染完成）
+      timeout: 30000,
+    });
+
+    // 额外等 2 秒，确保动态内容完全加载
+    await page.waitForTimeout(2000);
+
+    const html = await page.content();
+    await browser.close();
+    return html;
+  } catch (err) {
+    if (browser) await browser.close().catch(() => {});
+    throw new Error(`Playwright 采集失败: ${err.message}`);
   }
+}
 
+/**
+ * 用普通 fetch 抓取页面 HTML。
+ * 用于无 Cloudflare JS 挑战的站点（如 elmundo.es）。
+ */
+async function fetchHtmlWithFetch(url) {
   const resp = await fetch(url, {
     headers: {
       'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
       'Accept-Language': 'es-ES,es;q=0.9,en;q=0.8',
+      'Accept-Encoding': 'gzip, deflate',
       'Connection': 'keep-alive',
       'Upgrade-Insecure-Requests': '1',
       'Sec-Fetch-Dest': 'document',
       'Sec-Fetch-Mode': 'navigate',
       'Sec-Fetch-Site': 'none',
+      'Sec-Fetch-User': '?1',
       'Cache-Control': 'max-age=0',
     }
   });
-
   if (!resp.ok) {
     throw new Error(`HTTP ${resp.status}: ${resp.statusText}`);
   }
-
-  // 部分站点（如 elmundo.es）返回 iso-8859-15，通过 arrayBuffer + TextDecoder 统一处理
   const buf = await resp.arrayBuffer();
   const contentType = resp.headers.get('content-type') || '';
-  let encoding = 'utf-8';
-  if (
-    contentType.includes('iso-8859-15') ||
-    contentType.includes('latin1') ||
-    contentType.includes('latin-1')
-  ) {
-    encoding = 'iso-8859-15';
-  }
+  const encoding = contentType.includes('iso-8859-15') || contentType.includes('latin1') || contentType.includes('latin-1')
+    ? 'iso-8859-15' : 'utf-8';
   return new TextDecoder(encoding).decode(buf);
+}
+
+/**
+ * 统一入口：根据域名自动选择采集方式。
+ * - elpais.com → Playwright（Cloudflare JS 挑战）
+ * - 其他站点 → 普通 fetch
+ */
+async function fetchHtml(url) {
+  const hostname = new URL(url).hostname;
+  if (hostname.includes('elpais')) {
+    return fetchHtmlWithPlaywright(url);
+  }
+  return fetchHtmlWithFetch(url);
 }
 
 // ---------------------------------------------------------------------------
@@ -342,6 +395,17 @@ const LIST_PAGE_PATTERNS = [
 
 /**
  * 检测 URL 是否为列表页 / 首页。
+ *
+ * 检查顺序（优先级从高到低）：
+ * 1. 明显列表页特征（首页、/index.xxx）→ 直接拒绝
+ * 2. 【关键修复】明显文章特征（.html 后缀 或 日期路径 /YYYY/MM/DD/）→ 直接放行
+ *    这两类信号出现时，不论是否命中频道路径正则，都视为文章，不拦截。
+ *    修复原因：/cultura/, /internacional/ 等频道路径正则过于宽泛，
+ *    会错误拦截深层文章 URL（如 elmundo.es/cultura/cine/2026/06/04/slug.html）。
+ *    加此检查后，第 3 步正则只做参考性提示，不误杀有文章特征的 URL。
+ * 3. 频道路径正则匹配 → 做提示性检查
+ * 4. 路径段数 ≤ 2 且无 slug/日期 → 兜底判为列表页
+ *
  * 返回 { isListPage: boolean, reason: string }
  */
 function detectListPage(url) {
@@ -349,7 +413,8 @@ function detectListPage(url) {
   const path = parsed.pathname;
   const segments = path.split('/').filter(Boolean);
 
-  // 首页：空路径或 /
+
+  // ── 1. 首页：空路径或 / ──────────────────────────────────────────────
   if (!path || path === '/') {
     return { isListPage: true, reason: '首页（空路径）' };
   }
@@ -359,16 +424,25 @@ function detectListPage(url) {
     return { isListPage: true, reason: 'index 文件' };
   }
 
-  // 模式匹配
+  // ── 2. 【文章强信号】有 .html 后缀 或 日期路径段 → 直接放行 ──────────
+  //
+  // .html 后缀：大多数站点的文章 URL 以 .html 结尾（elmundo, elpais 等）
+  // 日期路径：elmundo 用 /YYYY/MM/DD/ 结构，elpais slug 内嵌日期
+  // 只要 URL 含这两者之一，几乎可以确定是文章而非列表页。
+  const hasHtmlSuffix = /\.html?$/i.test(path);                          // /xxx.html 或 /xxx.htm
+  const hasDatePathSegment = /\/\d{4}\/\d{2}\/\d{2}\//.test(path);     // 含 /2026/06/04/ 日期路径
+  if (hasHtmlSuffix || hasDatePathSegment) {
+    return { isListPage: false, reason: '' };
+  }
+
+  // ── 3. 频道路径正则匹配（只做提示性检查，不拦截有文章特征的 URL）───────
   for (const pat of LIST_PAGE_PATTERNS) {
     if (pat.test(url)) {
       return { isListPage: true, reason: `列表页模式匹配: ${pat.toString()}` };
     }
   }
 
-  // 辅助判断：路径段数量少且没有日期/article slug
-  // 例如: /elpais/abc 可能是频道页
-  // 如果只有 1-2 段且不含数字 ID / 年月日，判断为疑似列表页
+  // ── 4. 辅助判断：路径段少且没有 slug/日期 → 兜底判为列表页 ───────────
   if (segments.length <= 2) {
     const hasDateOrSlug = segments.some(seg =>
       /^\d{4}-\d{2}-\d{2}$/.test(seg) || // 日期 2024-01-01

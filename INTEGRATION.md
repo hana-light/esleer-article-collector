@@ -1,6 +1,10 @@
 # esleer 文章自动采集 Pipeline — OpenClaw Agent 接入文档
 
 > **读者定位**：本文档面向 OpenClaw agent，用于接入并驱动「采集文章 → AI 全文精读 → 笔记生成」完整流程。
+>
+> **⚠️ 重要**：本文档是 **OpenClaw 接入参考**，仅补充 OpenClaw agent 操作 esleer 应用的路径和凭证信息。
+> 所有 agent 在操作 esleer 仓库时，**必须遵循 esleer 根目录的 [CLAUDE.md](../esleer/CLAUDE.md)**（Migration CLI 规则、数据库不变量、禁止直接访问 DB 等）。
+> article-collector 通过 esleer-next API 写入数据，**严禁**直接操作数据库文件。
 
 ---
 
@@ -25,7 +29,9 @@
 完成：文章 + 笔记已保存到用户账号
 ```
 
-**为何用此流程而非 `/api/jobs/collect`**：collect 路由仅有基础 User-Agent，对 elpais.com / elmundo.es 必 403。`fetch-article.mjs` 内置 cookie 预热、完整 headers、iso-8859-15 编码处理，反爬能力强，是这两个站点的唯一可靠入口。
+**为何用此流程而非 `/api/jobs/collect`**：collect 路由仅有基础 User-Agent，对 elpais.com / elmundo.es 必 403。`fetch-article.mjs` 内置反爬策略：
+- **elpais.com**：用 Playwright（真实浏览器）绕过 Cloudflare JS 挑战
+- **elmundo 等其他站点**：普通 fetch + iso-8859-15 解码
 
 ---
 
@@ -38,6 +44,26 @@
 | 凭证文件 | `~/.config/esleer/credentials.json` |
 | DeepSeek API Key | 用户已在 esleer 前端设置中配置 |
 | Node.js 18+ | 运行 fetch-article.mjs |
+| Playwright + Chromium | **elpais.com 采集必须**，首次使用需安装（见下文） |
+
+### Playwright 安装（elpais.com 采集必须）
+
+**仅首次运行前需要执行，之后无需重复。**
+
+```bash
+cd ~/Documents/git/esleer-article-collector
+npm install
+npx playwright install chromium
+```
+
+| 步骤 | 说明 |
+|------|------|
+| `npm install` | 安装 playwright 依赖（package.json 已包含） |
+| `npx playwright install chromium` | 下载 Chromium 浏览器（约 100MB，永久保存） |
+
+安装后，`fetch-article.mjs` 会自动为 elpais.com 选择 Playwright 方式采集，**其他站点不受影响**。
+
+> **提示**：Chromium 浏览器文件保存在 `~/.cache/ms-playwright/`，多个项目共享，无需每个项目单独下载。
 
 ### 凭证文件格式
 
@@ -59,6 +85,9 @@
 ```bash
 node /path/to/esleer-article-collector/scripts/fetch-article.mjs <URL> --job-mode
 ```
+
+> **路径说明**：hana 电脑的实际路径为 `/Users/hana/Documents/git/esleer-article-collector/scripts/fetch-article.mjs`
+> （hiuvachow 电脑路径由 hiuvachow 用户自行填写，本文档按 hiuvachow 规范填写）
 
 `--job-mode` 标志：
 - **stdout**：仅输出一行 JSON（agent 解析此行）
@@ -106,7 +135,8 @@ title = data['title']
 | 首页/列表页 | 列表页/首页拒绝采集 | 提示用户提供具体文章 URL |
 | 节流限制 | 反爬限制 | 同一域名每天最多 3 次，次日重试 |
 | 正文不足 | 正文不足 | 页面内容 < 120 字符，可能需要 JS 渲染 |
-| HTTP 错误 | HTTP 4xx/5xx | 网络问题或站点封锁 |
+| HTTP 错误 | HTTP 4xx/5xx | 网络问题或站点封锁（非 elpais） |
+| Playwright 失败 | `Playwright 采集失败` | elpais 浏览器环境问题，检查 Chromium 是否安装 |
 
 ---
 
@@ -418,12 +448,14 @@ GET  /api/jobs/{jobId}（轮询300秒）     → 等待 status = "completed"
 
 ## 十二、关键文件路径
 
-| 文件 | 路径 |
-|------|------|
-| 采集脚本 | `esleer-article-collector/scripts/fetch-article.mjs` |
-| 凭证文件 | `~/.config/esleer/credentials.json` |
-| Session Cookie | `/tmp/esleer_session.txt`（运行时生成） |
-| 数据库（只读参考） | `~/Documents/GitHub/esleer/esleer-data/dev.db` |
-| 新 API 路由 | `esleer-next/src/app/api/jobs/from-article/[articleId]/confirm/route.ts` |
-| 共享 AI 处理函数 | `esleer-next/src/lib/ai/runAiProcessing.ts` |
-| 本文档 | `esleer-article-collector/INTEGRATION.md` |
+> **hana 电脑路径**（本文档参考）：`/Users/hana/Documents/git/`
+> **hiuvachow 电脑路径**：按各自机器上的实际路径填写
+
+| 文件 | hiuvachow 路径 | hana 路径 |
+|------|------|------|
+| 采集脚本 | `~/Documents/GitHub/esleer-article-collector/scripts/fetch-article.mjs` | `/Users/hana/Documents/git/esleer-article-collector/scripts/fetch-article.mjs` |
+| 凭证文件 | `~/.config/esleer/credentials.json` | 同 |
+| Session Cookie | `/tmp/esleer_session.txt` | 同 |
+| 数据库（只读参考） | `~/Documents/GitHub/esleer/esleer-data/dev.db` | `/Users/hana/Documents/git/esleer/esleer-data/dev.db` |
+| esleer-next 路由 | `~/Documents/GitHub/esleer/esleer-next/src/app/api/...` | `/Users/hana/Documents/git/esleer/esleer-next/src/app/api/...` |
+| 本文档 | `~/Documents/GitHub/esleer-article-collector/INTEGRATION.md` | `/Users/hana/Documents/git/esleer-article-collector/INTEGRATION.md` |

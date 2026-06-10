@@ -1,0 +1,10 @@
+{
+  "dependencies": {
+    "@libsql/client": "^0.17.3",
+    "@prisma/adapter-libsql": "^6.19.3",
+    "@prisma/client": "^5.20.0",
+    "cheerio": "^1.2.0",
+    "playwright": "^1.60.0",
+    "prisma": "^5.20.0"
+  }
+}
