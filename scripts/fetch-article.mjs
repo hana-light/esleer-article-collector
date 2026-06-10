@@ -153,12 +153,12 @@ async function fetchHtmlWithPlaywright(url) {
       });
 
       await page.goto(url, {
-        waitUntil: 'networkidle',   // 等网络空闲（JS 渲染完成）
-        timeout: 30000,
+        waitUntil: 'load',   // 等主文档加载即可，medium.com 网络idle 永不满足
+        timeout: 60000,
       });
 
-      // 额外等 2 秒，确保动态内容完全加载
-      await page.waitForTimeout(2000);
+      // 额外等 3 秒，确保动态内容完全加载
+      await page.waitForTimeout(3000);
 
       const html = await page.content();
       await browser.close();
@@ -229,7 +229,18 @@ async function fetchHtmlWithFetch(url) {
  */
 async function fetchHtml(url) {
   const hostname = new URL(url).hostname;
-  if (hostname.includes('elpais')) {
+
+
+  // 暂时不支持的站点（需 stealth Playwright 配置）
+  const UNSUPPORTED = ['nationalgeographic.com', 'nationalgeographic.com.es', 'clarin.com'];
+  if (UNSUPPORTED.some(d => hostname.includes(d))) {
+    throw new Error(
+      `[fetch-article] 暂时不支持 ${hostname}，需配置 stealth Playwright。` +
+      `可手动操作替代。`
+    );
+  }
+
+  if (hostname.includes('elpais') || hostname.includes('medium.com')) {
     return fetchHtmlWithPlaywright(url);
   }
   return fetchHtmlWithFetch(url);
@@ -474,6 +485,13 @@ function detectListPage(url) {
   // 只要 URL 含这两者之一，几乎可以确定是文章而非列表页。
   const hasHtmlSuffix = /\.html?$/i.test(path);                          // /xxx.html 或 /xxx.htm
   const hasDatePathSegment = /\/\d{4}\/\d{2}\/\d{2}\//.test(path);     // 含 /2026/06/04/ 日期路径
+
+  // Medium.com: @username/article-slug 或 topic/article-slug → 文章
+  const hostname = parsed.hostname;
+  if (hostname.includes('medium.com') && segments.length >= 2) {
+    return { isListPage: false, reason: '' };
+  }
+
   if (hasHtmlSuffix || hasDatePathSegment) {
     return { isListPage: false, reason: '' };
   }

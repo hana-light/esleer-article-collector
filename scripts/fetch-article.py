@@ -28,7 +28,7 @@ from urllib.parse import urlparse
 
 warnings.filterwarnings("ignore")
 
-DB_PATH = Path(__file__).parent.parent / "esleer-data" / "dev.db"
+DB_PATH = Path(__file__).parent.parent.parent / "esleer" / "esleer-data" / "dev.db"
 ADMIN_USER_ID = "cmmc0w0230000j6sjggm1mlir"
 FETCH_ERROR_LOG = Path(__file__).parent / "fetch-error.log"
 
@@ -213,6 +213,12 @@ def _extract_content(soup, title: str, mode: str = "default") -> str:
         for tag in best_block.find_all(["nav", "footer", "aside", "form"]):
             tag.decompose()
 
+        # 删除 elmundo 广告壳
+        for ad in best_block.find_all('div', class_=lambda c: c and 'skin-ad' in c):
+            ad.decompose()
+        for shell in best_block.find_all('div', class_=lambda c: c and 'ue-l-article' in c):
+            shell.decompose()
+
         # 只保留 article/main 容器内的 HTML，保留子元素的完整结构（含内联样式）
         result = ""
         for child in best_block.children:
@@ -257,7 +263,7 @@ def write_to_db(article_data: dict, mode: str = "default") -> int:
         INSERT INTO "Article" (
             "title", "subtitle", "content", "author", "source", "topic",
             "publishDate", "userId", "importSource", "firstImageUrl", "scope",
-            "createdAt", "updatedAt", "import_mode"
+            "createdAt", "updatedAt", "importMode"
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         article_data["title"],
@@ -273,7 +279,7 @@ def write_to_db(article_data: dict, mode: str = "default") -> int:
         "personal",
         now,
         now,
-        mode,  # import_mode
+        mode,  # importMode
     ))
 
     article_id = cursor.lastrowid
