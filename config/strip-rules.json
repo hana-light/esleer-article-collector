@@ -1,0 +1,33 @@
+{
+  "_comment": "raw 模式采集清洗规则，fetch-article.py 与 fetch-article.mjs 共享。key 为域名（自动匹配 www. 等子域），default 对所有站点生效。removeTags=按标签名删除；selectors=按 CSS selector 删除；textPatterns=正则匹配元素全文删除（用于无 class 钩子的推广段落）。",
+  "default": {
+    "removeTags": ["script", "style", "noscript", "link", "iframe", "svg", "button", "input", "select", "textarea", "form", "nav", "footer", "aside", "ins"],
+    "selectors": ["[role=\"button\"]", "[data-ad-fixed]", ".adsbygoogle", "[style*=\"position:fixed\"]", "[style*=\"position: fixed\"]"],
+    "textPatterns": []
+  },
+  "elpais.com": {
+    "selectors": [".a_md", ".w_rs", ".me", ".w-ae", "._sr", ".a_k", ".a_com", "[class*=\"outbrain\"]", "[class*=\"taboola\"]", "[class*=\"trc_\"]", "h1.a_t", "p.a_st"],
+    "textPatterns": []
+  },
+  "bbc.com": {
+    "selectors": ["[data-e2e=\"advertisement\"]", "[data-e2e=\"recommendations-wrapper\"]", "[data-e2e=\"recommendations-heading\"]", "[data-e2e=\"podcast-promo\"]", ".dotcom-ad", "h1.article-heading", "section:has([data-testid=\"byline\"])", "section:has([data-testid=\"read-time\"])", "img[src*=\"static.files.bbci.co.uk\"]", "[data-component=\"headline-block\"]", "[data-component=\"byline-block\"]", "[data-component=\"tag-list-block\"]", "[data-component=\"topic-list\"]", "[data-component=\"ad-block\"]", "[data-component=\"related-content-block\"]"],
+    "textPatterns": [
+      "^Haz clic aquí para leer",
+      "^Suscríbete aquí a nuestro",
+      "^También puedes seguirnos",
+      "^Y recuerda que puedes recibir",
+      "^Recuerda que puedes recibir",
+      "^Ahora puedes recibir notificaciones",
+      "^Follow BBC News",
+      "^Sign up (for|here)"
+    ]
+  },
+  "lavanguardia.com": {
+    "selectors": [".bottom_ad", "[class*=\"ads-wall\"]", "[class*=\"fixed\"][class*=\"bottom-0\"]", "[class*=\"fixed\"][class*=\"top-0\"]", ".article_info", ".content_component.related", ".related_item", ".related_details", ".content_component.signature", ".signature_author", ".author_bio", ".content_component.tags", ".tags-container", ".article_header .titles", ".freemium", "h2.subtitle", ".media_pill"],
+    "textPatterns": []
+  },
+  "elmundo.es": {
+    "selectors": [".skin-ad", ".hidden-content", ".ue-c-section-title", ".ue-c-article__bar", ".ue-c-article__kicker-group", "h1.ue-c-article__headline", ".ue-c-article__standfirst", ".ue-c-popular-links", ".right-panel", ".comments-panel", ".fixed-button", ".ue-c-article__tags-container", ".ue-c-article__media--video"],
+    "textPatterns": []
+  }
+}

@@ -54,11 +54,29 @@ cp config/credentials.example.json ~/.config/esleer/credentials.json
 
 ```bash
 # Python 版本（带列表页检测）
-python3 scripts/fetch-article.py <URL>
+python3 scripts/fetch-article.py <URL> [--mode=raw]
 
-# Node.js 版本（带节流保护，同一域名每天最多 3 次）
-node scripts/fetch-article.mjs <URL>
+# Node.js 版本（带节流保护，同一域名每天最多 3 次；elpais 等需 Playwright 的站点必须用这个）
+node scripts/fetch-article.mjs <URL> [--mode=raw]
+
+# 站点拦截自动化时的兜底：浏览器手动保存 HTML 后导入（不计节流额度）
+node scripts/fetch-article.mjs <URL> --mode=raw --html-file=<保存的HTML路径>
 ```
+
+`--mode=raw` 保留正文完整 HTML 结构，并按 `config/strip-rules.json`（按域名分组，
+两个脚本共享）在入库前清除按钮、广告、作者元数据、推广段落等垃圾元素。
+已适配站点：bbc.com（西语+英语）、elpais.com、lavanguardia.com、elmundo.es。
+新站点适配只需在 strip-rules.json 加一组规则，无需改代码。
+
+### 2.5 验收采集质量
+
+```bash
+python3 scripts/verify-article-content.py <article_id ...>   # 指定文章
+python3 scripts/verify-article-content.py --all-raw           # 全部 raw 文章
+```
+
+检查禁用标签/垃圾 class/推广文案等，FAIL 时按报告补 strip-rules.json 后重采。
+详见 docs/raw-mode-test-report-2026-06-11.md。
 
 ### 3. AI 精读 + 保存笔记
 

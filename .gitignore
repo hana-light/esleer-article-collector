@@ -37,3 +37,5 @@ session_cookie.txt
 # macOS
 .AppleDB
 .AppleDB-lock
+# 节流运行时状态（每次采集都会变化）
+scripts/fetch-log.json

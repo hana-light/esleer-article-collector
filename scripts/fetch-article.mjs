@@ -19,8 +19,7 @@
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { readFileSync, writeFileSync, appendFileSync } from 'fs';
-import pkg from '@prisma/client';
-const { PrismaClient } = pkg;
+import { createClient } from '@libsql/client';
 import * as cheerio from 'cheerio';
 import { chromium } from 'playwright';
 
@@ -32,6 +31,7 @@ const DB_PATH = process.env.ESLEER_DB_PATH ||
   path.resolve(PROJECT_ROOT, '..', 'esleer', 'esleer-data', 'dev.db');
 const FETCH_LOG = path.resolve(__dirname, 'fetch-log.json');
 const FETCH_ERROR_LOG = path.resolve(__dirname, 'fetch-error.log');
+const STRIP_RULES_PATH = path.resolve(PROJECT_ROOT, 'config', 'strip-rules.json');
 const USER_ID = 'cmmc0w0230000j6sjggm1mlir';
 
 // ---------------------------------------------------------------------------
@@ -106,14 +106,11 @@ function logFetchError(url, errorType, errorMessage) {
 }
 
 // ---------------------------------------------------------------------------
-// Prisma Client（直连本地 SQLite）
-// 使用 PRISMA_DATABASE_URL 环境变量，与 esleer-next 保持一致
+// 本地 SQLite 客户端（@libsql/client，file: 直连，不依赖 Prisma 生成产物）
 // ---------------------------------------------------------------------------
 
-function createPrisma() {
-  // 覆盖 env var，指向正确的 DB 路径
-  process.env.PRISMA_DATABASE_URL = `file:${DB_PATH}`;
-  return new PrismaClient();
+function createDb() {
+  return createClient({ url: `file:${DB_PATH}` });
 }
 
 // ---------------------------------------------------------------------------
@@ -247,14 +244,118 @@ async function fetchHtml(url) {
 }
 
 // ---------------------------------------------------------------------------
+// raw 模式清洗规则（config/strip-rules.json，与 fetch-article.py 共享）
+// ---------------------------------------------------------------------------
+
+function loadStripRules(hostname) {
+  let allRules;
+  try {
+    allRules = JSON.parse(readFileSync(STRIP_RULES_PATH, 'utf8'));
+  } catch (err) {
+    console.error(`[fetch-article.mjs] strip-rules.json 加载失败，跳过清洗: ${err.message}`);
+    return { removeTags: [], selectors: [], textPatterns: [] };
+  }
+  const merged = { removeTags: [], selectors: [], textPatterns: [] };
+  for (const [key, rules] of Object.entries(allRules)) {
+    if (key.startsWith('_')) continue;
+    if (key === 'default' || hostname === key || hostname.endsWith('.' + key)) {
+      for (const field of Object.keys(merged)) {
+        merged[field].push(...(rules[field] ?? []));
+      }
+    }
+  }
+  return merged;
+}
+
+/**
+ * raw 模式正文提取：取 <p> 文本量最大的 article/main 容器，
+ * 按共享规则清洗后保留完整 HTML 结构。
+ */
+function extractRawContent($, hostname, title = '', subtitle = '') {
+  let best = null;
+  let bestScore = 0;
+  $('article, main').each((_, el) => {
+    let score = 0;
+    $(el).find('p').each((_, p) => {
+      const t = $(p).text().trim();
+      if (t.length > 30) score += t.length;
+    });
+    if (score > bestScore) { bestScore = score; best = el; }
+  });
+  if (!best) return '';
+  const $best = $(best);
+  const rules = loadStripRules(hostname);
+
+  // 1) 按标签名删除（script/iframe/svg/button 等非正文元素）
+  for (const tag of rules.removeTags) $best.find(tag).remove();
+
+  // 2) 按 CSS selector 删除（站点专属：作者区、分享栏、广告壳等）
+  for (const selector of rules.selectors) {
+    try {
+      $best.find(selector).remove();
+    } catch (err) {
+      console.error(`[fetch-article.mjs] selector 无效，跳过 ${selector}: ${err.message}`);
+    }
+  }
+
+  // 2b) 删除与标题/副标题文字完全相同的标题元素（reader 已单独展示，
+  //     正文内重复出现会渲染成"另一个大标题"）
+  const norm = s => (s || '').replace(/\s+/g, ' ').trim();
+  const tNorm = norm(title);
+  const stNorm = norm(subtitle);
+  $best.find('h1, h2, h3').each((_, el) => {
+    const ht = norm($(el).text());
+    if (ht && (ht === tNorm || ht === stNorm)) $(el).remove();
+  });
+
+  // 3) 按文本模式删除（无 class 钩子的推广段落，限短文本防误删正文）
+  const patterns = rules.textPatterns.map(p => new RegExp(p, 'i'));
+  if (patterns.length) {
+    $best.find('p, div, section').each((_, el) => {
+      const text = $(el).text().replace(/\s+/g, ' ').trim();
+      if (text && text.length < 300 && patterns.some(p => p.test(text))) $(el).remove();
+    });
+  }
+
+  // 4) 剥除纵横比占位样式（padding-top/bottom: N% 依赖站点 CSS 的绝对定位
+  //    子元素才成立，脱离源站后渲染为大段空白，如 BBC 图片容器）
+  $best.find('[style]').each((_, el) => {
+    const style = $(el).attr('style') || '';
+    const parts = style.split(';').filter(p => p.trim());
+    const kept = parts.filter(p => !/^\s*padding-(top|bottom)\s*:\s*[\d.]+%\s*$/i.test(p));
+    if (kept.length !== parts.length) {
+      if (kept.length) $(el).attr('style', kept.join(';'));
+      else $(el).removeAttr('style');
+    }
+  });
+
+  // 5) 清除清洗后留下的空壳元素（保留含图片/视频/表格的）
+  for (let pass = 0; pass < 4; pass++) {
+    let removed = 0;
+    $best.find('p, div, span, figure, section, ul, li, header').each((_, el) => {
+      const $el = $(el);
+      if ($el.find('img, picture, video, source, table').length) return;
+      if (!$el.text().trim()) { $el.remove(); removed++; }
+    });
+    if (!removed) break;
+  }
+
+  return $best.html() ?? '';
+}
+
+// ---------------------------------------------------------------------------
 // 正文提取
 // ---------------------------------------------------------------------------
 
-function extractArticle(htmlContent, url) {
+function extractArticle(htmlContent, url, mode = 'default') {
   const $ = cheerio.load(htmlContent);
 
-  // 移除干扰标签
-  $('nav, header, footer, aside, form, script, style').remove();
+  // 移除干扰标签（raw 模式保留 header：elpais 等站点的头图在 <header> 内，
+  // 标题/副标题重复由 strip-rules.json 按站点清除）
+  $(mode === 'raw'
+    ? 'nav, footer, aside, form, script, style'
+    : 'nav, header, footer, aside, form, script, style'
+  ).remove();
 
   const hostname = new URL(url).hostname;
 
@@ -293,6 +394,26 @@ function extractArticle(htmlContent, url) {
     } catch { /* keep default */ }
   }
 
+  // ── raw 模式：保留完整 HTML，按共享配置清洗 ──────────────
+  if (mode === 'raw') {
+    const content = extractRawContent($, hostname, title, subtitle);
+    if (!content || content.length < 120) {
+      throw new Error(
+        `正文不足（${content.length} chars），页面可能需要 JS 渲染或被禁止访问`
+      );
+    }
+    return {
+      title,
+      subtitle,
+      content,
+      author: author || hostname,
+      source: hostname,
+      topic: extractTopicFromUrl(url),
+      publishDate,
+    };
+  }
+
+  // ── default 模式：纯文本 <p> ─────────────────────────────
   // 正文容器选择器
   const contentContainer =
     $('article[id*="cuerpo"]').first().length ||
@@ -345,7 +466,19 @@ function extractArticle(htmlContent, url) {
     );
   }
 
-  // 主题：从 URL 路径提取
+  return {
+    title,
+    subtitle,
+    content,
+    author: author || hostname,
+    source: hostname,
+    topic: extractTopicFromUrl(url),
+    publishDate,
+  };
+}
+
+// 主题：从 URL 路径提取
+function extractTopicFromUrl(url) {
   let topic = 'Inbox';
   try {
     const urlObj = new URL(url);
@@ -359,54 +492,58 @@ function extractArticle(htmlContent, url) {
       }
     }
   } catch { /* keep default */ }
-
-  return {
-    title,
-    subtitle,
-    content,
-    author: author || hostname,
-    source: hostname,
-    topic,
-    publishDate: new Date(publishDate),
-  };
+  return topic;
 }
 
 // ---------------------------------------------------------------------------
-// 写入数据库 + Prisma 验证
+// 写入数据库 + 回读验证
+// 注意：DateTime 列必须写 ISO 8601 UTC 带 Z 后缀的字符串，
+// 否则 Prisma 运行时读取会报错（见 esleer/doc/prisma-datetime-troubleshooting.md）
 // ---------------------------------------------------------------------------
 
-async function writeArticle(articleData) {
-  const prisma = createPrisma();
-  const now = new Date();
+async function writeArticle(articleData, mode = 'default') {
+  const db = createDb();
+  const now = new Date().toISOString();
 
   try {
-    const article = await prisma.article.create({
-      data: {
-        title: articleData.title,
-        subtitle: articleData.subtitle || '',
-        content: articleData.content,
-        author: articleData.author || '',
-        source: articleData.source || '',
-        topic: articleData.topic || 'Inbox',
-        publishDate: articleData.publishDate,
-        userId: USER_ID,
-        importSource: 'webpage',
-        scope: 'personal',
-        contentVersion: 1,
-        createdAt: now,
-        updatedAt: now,
-      }
+    const result = await db.execute({
+      sql: `INSERT INTO "Article" (
+              "title", "subtitle", "content", "author", "source", "topic",
+              "publishDate", "userId", "importSource", "scope",
+              "contentVersion", "createdAt", "updatedAt", "importMode"
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      args: [
+        articleData.title,
+        articleData.subtitle || '',
+        articleData.content,
+        articleData.author || '',
+        articleData.source || '',
+        articleData.topic || 'Inbox',
+        articleData.publishDate || now,
+        USER_ID,
+        'webpage',
+        'personal',
+        1,
+        now,
+        now,
+        mode,
+      ],
     });
 
-    // Prisma 验证：读一次确认能查到
-    const found = await prisma.article.findUnique({ where: { id: article.id } });
-    if (!found) {
-      throw new Error(`Prisma 验证失败：写入后查询返回 null（id=${article.id}）`);
+    const articleId = Number(result.lastInsertRowid);
+
+    // 回读验证：确认写入成功
+    const found = await db.execute({
+      sql: 'SELECT id FROM "Article" WHERE id = ?',
+      args: [articleId],
+    });
+    if (!found.rows.length) {
+      throw new Error(`写入验证失败：写入后查询返回空（id=${articleId}）`);
     }
 
-    return article.id;
+    return articleId;
   } finally {
-    await prisma.$disconnect();
+    db.close();
   }
 }
 
@@ -485,6 +622,8 @@ function detectListPage(url) {
   // 只要 URL 含这两者之一，几乎可以确定是文章而非列表页。
   const hasHtmlSuffix = /\.html?$/i.test(path);                          // /xxx.html 或 /xxx.htm
   const hasDatePathSegment = /\/\d{4}\/\d{2}\/\d{2}\//.test(path);     // 含 /2026/06/04/ 日期路径
+  // BBC 文章: /news/articles/<id> 或 /mundo/articles/<id>，id 为字母数字混合
+  const hasBbcArticleSegment = /\/articles\/[a-z0-9]+\/?$/i.test(path);
 
   // Medium.com: @username/article-slug 或 topic/article-slug → 文章
   const hostname = parsed.hostname;
@@ -492,7 +631,7 @@ function detectListPage(url) {
     return { isListPage: false, reason: '' };
   }
 
-  if (hasHtmlSuffix || hasDatePathSegment) {
+  if (hasHtmlSuffix || hasDatePathSegment || hasBbcArticleSegment) {
     return { isListPage: false, reason: '' };
   }
 
@@ -531,7 +670,19 @@ async function main() {
 
   const url = args.find(a => !a.startsWith('--'))?.trim();
   if (!url) {
-    console.error('用法: node scripts/fetch-article.mjs <URL> [--job-mode]');
+    console.error('用法: node scripts/fetch-article.mjs <URL> [--mode=default|raw] [--html-file=<path>] [--job-mode]');
+    console.error('  --html-file: 跳过网络抓取，从本地 HTML 文件导入（站点拦截自动化时手动保存页面的兜底）');
+    process.exit(1);
+  }
+
+  // 手动兜底：从本地文件读 HTML（URL 仍用于提取 source/topic 元数据）
+  const htmlFileArg = args.find(a => a.startsWith('--html-file='));
+  const htmlFile = htmlFileArg ? htmlFileArg.slice('--html-file='.length) : null;
+
+  const modeArg = args.find(a => a.startsWith('--mode='));
+  const mode = modeArg ? modeArg.slice('--mode='.length) : 'default';
+  if (!['default', 'raw'].includes(mode)) {
+    console.error(`❌ 无效 mode: ${mode}（可选 default | raw）`);
     process.exit(1);
   }
 
@@ -551,21 +702,26 @@ async function main() {
     process.exit(1);
   }
 
-  // 检查节流
+  // 检查节流（本地文件导入不走网络，不受限制）
   const { allowed, count, limit } = checkThrottle(hostname);
-  if (!allowed) {
+  if (!htmlFile && !allowed) {
     console.error(
       `❌ 反爬限制：${hostname} 今天已采集 ${count}/${limit} 次，请明天再试`
     );
     process.exit(1);
   }
 
-  log(`🌐 抓取: ${url}  (${hostname} 今天第 ${count + 1}/${limit} 次)`);
-
-  const htmlContent = await fetchHtml(url);
+  let htmlContent;
+  if (htmlFile) {
+    log(`📄 从本地文件导入: ${htmlFile}  [mode=${mode}]`);
+    htmlContent = readFileSync(htmlFile, 'utf8');
+  } else {
+    log(`🌐 抓取: ${url}  [mode=${mode}]  (${hostname} 今天第 ${count + 1}/${limit} 次)`);
+    htmlContent = await fetchHtml(url);
+  }
   log(`  HTML 大小: ${htmlContent.length.toLocaleString()} chars`);
 
-  const articleData = extractArticle(htmlContent, url);
+  const articleData = extractArticle(htmlContent, url, mode);
   log(`  标题: ${articleData.title.slice(0, 60)}`);
   log(`  作者: ${articleData.author || 'N/A'}`);
   log(`  主题: ${articleData.topic}`);
@@ -573,16 +729,18 @@ async function main() {
 
   let articleId;
   try {
-    articleId = await writeArticle(articleData);
+    articleId = await writeArticle(articleData, mode);
   } catch (err) {
     // 写入失败，不占 quota
     throw new Error(`写入数据库失败: ${err.message}`);
   }
 
-  try {
-    recordFetch(hostname);
-  } catch (err) {
-    log(`⚠ 记录节流日志失败（不影响文章保存）: ${err.message}`);
+  if (!htmlFile) {
+    try {
+      recordFetch(hostname);
+    } catch (err) {
+      log(`⚠ 记录节流日志失败（不影响文章保存）: ${err.message}`);
+    }
   }
 
   if (JOB_MODE) {
