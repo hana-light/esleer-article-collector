@@ -18,6 +18,7 @@
 
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { randomInt } from 'crypto';
 import { readFileSync, writeFileSync, appendFileSync } from 'fs';
 import { createClient } from '@libsql/client';
 import * as cheerio from 'cheerio';
@@ -501,6 +502,16 @@ function extractTopicFromUrl(url) {
 // 否则 Prisma 运行时读取会报错（见 esleer/doc/prisma-datetime-troubleshooting.md）
 // ---------------------------------------------------------------------------
 
+// 与 esleer-next/src/lib/publicId.ts 保持一致：12 位纯字母数字短 ID，URL 对外使用
+function generatePublicId() {
+  const alphabet = '0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ';
+  let id = '';
+  for (let i = 0; i < 12; i += 1) {
+    id += alphabet[randomInt(alphabet.length)];
+  }
+  return id;
+}
+
 async function writeArticle(articleData, mode = 'default') {
   const db = createDb();
   const now = new Date().toISOString();
@@ -508,11 +519,12 @@ async function writeArticle(articleData, mode = 'default') {
   try {
     const result = await db.execute({
       sql: `INSERT INTO "Article" (
-              "title", "subtitle", "content", "author", "source", "topic",
+              "publicId", "title", "subtitle", "content", "author", "source", "topic",
               "publishDate", "userId", "importSource", "scope",
               "contentVersion", "createdAt", "updatedAt", "importMode"
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       args: [
+        generatePublicId(),
         articleData.title,
         articleData.subtitle || '',
         articleData.content,

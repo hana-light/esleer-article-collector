@@ -17,6 +17,7 @@ ESLEER 文章采集脚本
 
 import sys
 import re
+import secrets
 import sqlite3
 import html
 import warnings
@@ -334,6 +335,12 @@ def _extract_content(soup, title: str, mode: str = "default", hostname: str = ""
     return "".join(parts)
 
 
+def generate_public_id() -> str:
+    """与 esleer-next/src/lib/publicId.ts 保持一致：12 位纯字母数字短 ID，URL 对外使用"""
+    alphabet = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    return "".join(secrets.choice(alphabet) for _ in range(12))
+
+
 def write_to_db(article_data: dict, mode: str = "default") -> int:
     """写入 dev.db，返回 article id"""
     conn = sqlite3.connect(DB_PATH)
@@ -342,11 +349,12 @@ def write_to_db(article_data: dict, mode: str = "default") -> int:
 
     cursor.execute("""
         INSERT INTO "Article" (
-            "title", "subtitle", "content", "author", "source", "topic",
+            "publicId", "title", "subtitle", "content", "author", "source", "topic",
             "publishDate", "userId", "importSource", "firstImageUrl", "scope",
             "createdAt", "updatedAt", "importMode"
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
+        generate_public_id(),
         article_data["title"],
         article_data.get("subtitle") or "",
         article_data["content"],
